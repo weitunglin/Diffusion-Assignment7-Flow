@@ -47,7 +47,7 @@ class FMScheduler(nn.Module):
         # DO NOT change the code outside this part.
         # compute psi_t(x)
 
-        psi_t = x1
+        psi_t = (1 - (1 - self.sigma_min) * t) * x + t * x1
         ######################
 
         return psi_t
@@ -61,7 +61,10 @@ class FMScheduler(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # implement each step of the first-order Euler method.
-        x_next = xt
+        dtt = expand_t(dt, xt)
+        dtt = dtt.expand(-1, *xt.shape[1:])
+        dtt = torch.cat([dtt, dtt], dim=0)
+        x_next = xt + dtt * vt
         ######################
 
         return x_next
@@ -93,12 +96,19 @@ class FlowMatching(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # Implement the CFM objective.
-        if class_label is not None:
-            model_out = self.network(x1, t, class_label=class_label)
-        else:
-            model_out = self.network(x1, t)
+        # t = expand_t(t, x1).expand(-1, x1.shape[1])
+        # print(x0.shape, x1.shape, t.shape)
+        tt = expand_t(t, x1).expand(-1, *x1.shape[1:])
+        xt = (1 - tt) * x0 + tt * x1
 
-        loss = x1.mean()
+
+        if class_label is not None:
+            model_out = self.network(xt, t, class_label=class_label)
+        else:
+            model_out = self.network(xt, t)
+
+        dxt = x1 - x0
+        loss = F.mse_loss(model_out, dxt)
         ######################
 
         return loss
@@ -143,8 +153,17 @@ class FlowMatching(nn.Module):
             ######## TODO ########
             # Complete the sampling loop
 
-            xt = self.fm_scheduler.step(xt, torch.zeros_like(xt), torch.zeros_like(t))
+            if do_classifier_free_guidance:
+                x_uncond_cond = torch.cat([xt, xt], dim=0)
+                t_uncond_cond = torch.cat([t, t], dim=0)
+                class_label_uncond_cond = torch.cat([class_label, torch.zeros_like(class_label)], dim=0)
 
+                xt_uncond_cond = self.fm_scheduler.step(x_uncond_cond, self.network(x_uncond_cond, t_uncond_cond, class_label_uncond_cond), t_next - t)
+                xt_cond, xt_uncond = xt_uncond_cond.chunk(2, dim=0)
+
+                xt = (1 + guidance_scale) * xt_cond - guidance_scale * xt_uncond
+            else:
+                xt = self.fm_scheduler.step(xt, self.network(xt, t), t_next - t)
             ######################
 
             traj[-1] = traj[-1].cpu()
